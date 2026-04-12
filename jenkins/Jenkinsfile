@@ -1,0 +1,152 @@
+pipeline {
+
+    agent any
+
+    triggers {
+        githubPush()
+    }
+
+    parameters {
+        string(name: 'IMAGE_REPOSITORY', defaultValue: 'ghcr.io/your-org/cicd-app', description: 'Full image repository, including registry host and image path.')
+        string(name: 'REGISTRY_URL', defaultValue: 'ghcr.io', description: 'Registry host used for docker login.')
+        string(name: 'KUBE_NAMESPACE', defaultValue: 'devops', description: 'Target Kubernetes namespace.')
+        string(name: 'KUBE_CONTEXT', defaultValue: '', description: 'Optional kubectl context name. Leave blank to use the current context.')
+        string(name: 'REGISTRY_CREDENTIALS_ID', defaultValue: 'registry-credentials', description: 'Jenkins username/password credentials for registry access.')
+    }
+
+    environment {
+        VERSION = "${BUILD_NUMBER}"
+        RENDERED_DIR = ".rendered-k8s"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh 'mvn -f app/pom.xml clean package -DskipTests'
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh 'mvn -f app/pom.xml test'
+            }
+        }
+
+        stage('Determine Target Color') {
+            steps {
+                script {
+                    def kubectlContext = params.KUBE_CONTEXT?.trim()
+                    def contextArg = kubectlContext ? "--context ${kubectlContext}" : ""
+                    def activeColor = sh(
+                        script: "kubectl ${contextArg} -n ${KUBE_NAMESPACE} get svc app-service -o jsonpath='{.spec.selector.version}' 2>/dev/null || true",
+                        returnStdout: true
+                    ).trim()
+                    if (!activeColor) {
+                        activeColor = 'blue'
+                    }
+
+                    env.ACTIVE_COLOR = activeColor
+                    env.TARGET_COLOR = activeColor == 'blue' ? 'green' : 'blue'
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh 'docker build -f app/Dockerfile -t ${IMAGE_REPOSITORY}:${VERSION} app'
+            }
+        }
+
+        stage('Docker Push') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: params.REGISTRY_CREDENTIALS_ID, usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASS')]) {
+                    sh '''
+                    set -e
+                    echo "$REGISTRY_PASS" | docker login "$REGISTRY_URL" -u "$REGISTRY_USER" --password-stdin
+                    docker push "${IMAGE_REPOSITORY}:${VERSION}"
+                    '''
+                }
+            }
+        }
+
+        stage('Render Manifests') {
+            steps {
+                sh '''
+                set -e
+                rm -rf "$RENDERED_DIR"
+                mkdir -p "$RENDERED_DIR"
+                for file in k8s/*.yaml logging/*.yaml; do
+                  sed \
+                    -e "s#__KUBE_NAMESPACE__#${KUBE_NAMESPACE}#g" \
+                    -e "s#__IMAGE_REPOSITORY__#${IMAGE_REPOSITORY}#g" \
+                    -e "s#__IMAGE_TAG__#${VERSION}#g" \
+                    -e "s#__TARGET_COLOR__#${TARGET_COLOR}#g" \
+                    "$file" > "$RENDERED_DIR/$(basename "$file")"
+                done
+                '''
+            }
+        }
+
+        stage('Deploy Inactive Color') {
+            steps {
+                script {
+                    def kubectlContext = params.KUBE_CONTEXT?.trim()
+                    def contextArg = kubectlContext ? "--context ${kubectlContext}" : ""
+                    sh "kubectl ${contextArg} apply -f ${RENDERED_DIR}/namespace.yaml"
+                    sh "kubectl ${contextArg} apply -f ${RENDERED_DIR}/elasticsearch.yaml"
+                    sh "kubectl ${contextArg} apply -f ${RENDERED_DIR}/logstash.yaml"
+                    sh "kubectl ${contextArg} apply -f ${RENDERED_DIR}/kibana.yaml"
+                    sh "kubectl ${contextArg} apply -f ${RENDERED_DIR}/service.yaml"
+                    sh "kubectl ${contextArg} apply -f ${RENDERED_DIR}/hpa.yaml"
+                    sh "kubectl ${contextArg} apply -f ${RENDERED_DIR}/${TARGET_COLOR}-deployment.yaml"
+                    sh "kubectl ${contextArg} -n ${KUBE_NAMESPACE} rollout status deployment/app-${TARGET_COLOR}"
+                }
+            }
+        }
+
+        stage('Switch Traffic') {
+            steps {
+                script {
+                    def kubectlContext = params.KUBE_CONTEXT?.trim()
+                    def contextArg = kubectlContext ? "--context ${kubectlContext}" : ""
+                    sh "kubectl ${contextArg} -n ${KUBE_NAMESPACE} patch service app-service -p '{\"spec\":{\"selector\":{\"version\":\"${env.TARGET_COLOR}\"}}}'"
+                }
+            }
+        }
+
+        stage('Verify Deployment Evidence') {
+            steps {
+                script {
+                    def kubectlContext = params.KUBE_CONTEXT?.trim()
+                    def contextArg = kubectlContext ? "--context ${kubectlContext}" : ""
+                    sh "echo 'Current service selector version:'"
+                    sh "kubectl ${contextArg} -n ${KUBE_NAMESPACE} get service app-service -o jsonpath='{.spec.selector.version}' && echo"
+                    sh "echo 'Current deployment images:'"
+                    sh "kubectl ${contextArg} -n ${KUBE_NAMESPACE} get deployments -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image"
+                }
+            }
+        }
+
+    }
+
+    post {
+        failure {
+            script {
+                if (env.ACTIVE_COLOR && env.TARGET_COLOR && env.ACTIVE_COLOR != env.TARGET_COLOR) {
+                    def kubectlContext = params.KUBE_CONTEXT?.trim()
+                    def contextArg = kubectlContext ? "--context ${kubectlContext}" : ""
+                    sh "kubectl ${contextArg} -n ${KUBE_NAMESPACE} patch service app-service -p '{\"spec\":{\"selector\":{\"version\":\"${env.ACTIVE_COLOR}\"}}}'"
+                    sh "kubectl ${contextArg} -n ${KUBE_NAMESPACE} patch hpa app-hpa -p '{\"spec\":{\"scaleTargetRef\":{\"name\":\"app-${env.ACTIVE_COLOR}\"}}}'"
+                }
+            }
+        }
+    }
+
+}

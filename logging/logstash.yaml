@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: logstash
+  namespace: __KUBE_NAMESPACE__
+
+spec:
+
+  replicas: 1
+
+  selector:
+
+    matchLabels:
+
+      app: logstash
+
+  template:
+
+    metadata:
+
+      labels:
+
+        app: logstash
+
+    spec:
+
+      containers:
+
+      - name: logstash
+
+        image: docker.elastic.co/logstash/logstash:8.5.0
+        ports:
+        - containerPort: 5000
+        volumeMounts:
+        - name: pipeline
+          mountPath: /usr/share/logstash/pipeline/logstash.conf
+          subPath: logstash.conf
+
+      volumes:
+      - name: pipeline
+        configMap:
+          name: logstash-pipeline
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-pipeline
+  namespace: __KUBE_NAMESPACE__
+data:
+  logstash.conf: |
+    input {
+      tcp {
+        port => 5000
+        codec => json_lines
+      }
+    }
+
+    output {
+      elasticsearch {
+        hosts => ["http://elasticsearch:9200"]
+        index => "cicd-app-%{+YYYY.MM.dd}"
+      }
+      stdout { codec => rubydebug }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logstash
+  namespace: __KUBE_NAMESPACE__
+spec:
+  selector:
+    app: logstash
+  ports:
+  - name: tcp
+    port: 5000
+    targetPort: 5000

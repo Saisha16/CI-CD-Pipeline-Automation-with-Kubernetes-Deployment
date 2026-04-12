@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: app-green
+  namespace: __KUBE_NAMESPACE__
+
+spec:
+  replicas: 2
+  minReadySeconds: 5
+  progressDeadlineSeconds: 120
+
+  selector:
+    matchLabels:
+      app: cicd
+      version: green
+
+  template:
+    metadata:
+      labels:
+        app: cicd
+        version: green
+
+    spec:
+      containers:
+      - name: app
+        image: __IMAGE_REPOSITORY__:__IMAGE_TAG__
+        ports:
+        - containerPort: 8080
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: kubernetes
+        - name: LOGSTASH_HOST
+          value: logstash
+        - name: LOGSTASH_PORT
+          value: "5000"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
