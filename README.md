@@ -21,6 +21,55 @@ The system is organized as a simple delivery chain:
 7. Elasticsearch, Logstash, and Kibana collect and visualize logs.
 8. Horizontal Pod Autoscaler scales the workload when load increases.
 
+### System Diagram
+
+```mermaid
+graph LR
+    A["👨‍💻 Developer"] -->|git push| B["GitHub Repo"]
+    B -->|webhook trigger| C["Jenkins"]
+    
+    C -->|Checkout| D["Build & Test"]
+    D -->|mvn clean package| E["Docker Build"]
+    E -->|docker build| F["Docker Image"]
+    F -->|docker push| G["Container Registry"]
+    
+    G -->|pull image| H["Kubernetes Cluster"]
+    
+    H -->|Deploy Inactive| I["Blue Deployment<br/>v1.0"]
+    H -->|Health Checks| J["Service Selector<br/>Routes Traffic"]
+    H -->|Deploy Active| K["Green Deployment<br/>v2.0"]
+    
+    I -->|readiness/<br/>liveness probes| J
+    K -->|readiness/<br/>liveness probes| J
+    
+    J -->|scales based<br/>on CPU| L["HPA<br/>2-5 replicas"]
+    
+    I -->|logs TCP:5000| M["Logstash"]
+    K -->|logs TCP:5000| M
+    M -->|parse & forward| N["Elasticsearch<br/>:9200"]
+    N -->|query| O["Kibana<br/>:5601"]
+    
+    I -->|metrics| P["Prometheus"]
+    K -->|metrics| P
+    P -->|visualize| Q["Grafana<br/>:3000"]
+    
+    R["Users"] -->|HTTP| J
+    
+    style C fill:#1e3a5f
+    style H fill:#1e3a5f
+    style M fill:#663399
+    style N fill:#663399
+    style O fill:#663399
+    style P fill:#9d4edd
+    style Q fill:#9d4edd
+```
+
+**Data Flow:**
+- **CI/CD Pipeline (Jenkins → Container Registry):** Code changes trigger automated build, test, and containerization
+- **Deployment (Registry → Kubernetes):** Images deployed to blue/green deployments with health checks and automatic scaling
+- **Logging (App → ELK Stack):** Application logs ship to Logstash via TCP, aggregated in Elasticsearch, visualized in Kibana
+- **Monitoring (App → Prometheus → Grafana):** Application metrics collected by Prometheus and displayed in Grafana dashboards
+
 ## Pipeline Purpose
 
 The pipeline exists to automate the path from code change to production-ready release. Its job is to:
